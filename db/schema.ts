@@ -19,3 +19,8 @@ export const jobRuns = sqliteTable("desk_job_runs", {
   finishedAt: text("finished_at"),
   result: text("result"),
 });
+
+// The clients table is extended at runtime by server/clients.js (ensureClients):
+// contact, operator, key_events, time_zone, notes and updated_at, plus the
+// client_reviews table. Like the Google, health and AI tables, these are
+// bootstrapped idempotently so that existing databases need no manual migration.

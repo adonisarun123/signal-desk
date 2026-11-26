@@ -1,7 +1,7 @@
 import {getDemoState} from "./overview.js";
 
 const storageKey="signal-desk.demo.v1";
-const emptyChanges=()=>({clients:[],statuses:{},hidden:[],linked:[],evidence:[],scheduleEnabled:true,lastCheck:null});
+const emptyChanges=()=>({clients:[],statuses:{},signalEdits:{},clientEdits:{},removedClients:[],hidden:[],linked:[],evidence:[],failures:[],scheduleEnabled:true,lastCheck:null});
 let changes;
 try {changes={...emptyChanges(),...JSON.parse(localStorage.getItem(storageKey)||"{}")};}
 catch {changes=emptyChanges();}
@@ -17,16 +17,17 @@ function observations(rows,clients) {
   }).sort((a,b)=>b.observedAt.localeCompare(a.observedAt));
 }
 export function demoWorkspace(){
-  const base=getDemoState(), clients=[...base.clients,...changes.clients];
-  const bindings=[...base.bindings,...changes.linked].filter(b=>!changes.hidden.includes(b.id)&&!changes.hidden.includes(b.accountId));
+  const base=getDemoState(), removed=new Set(changes.removedClients);
+  const clients=[...base.clients,...changes.clients].filter(c=>!removed.has(c.id)).map(c=>({...c,...(changes.clientEdits[c.id]||{})}));
+  const bindings=[...base.bindings,...changes.linked].filter(b=>!removed.has(b.clientId)&&!changes.hidden.includes(b.id)&&!changes.hidden.includes(b.accountId));
   const activeIds=new Set(bindings.map(x=>x.id));
-  const signals=base.signals.filter(s=>bindings.some(b=>b.clientId===s.clientId && b.source===s.source)).map(s=>({...s,status:changes.statuses[s.id]||s.status}));
-  const mentions=observations([...changes.evidence,...base.mentions],clients);
+  const signals=base.signals.filter(s=>bindings.some(b=>b.clientId===s.clientId && b.source===s.source)).map(s=>({...s,status:changes.statuses[s.id]||s.status,...(changes.signalEdits[s.id]||{})}));
+  const mentions=observations([...changes.evidence,...base.mentions].filter(o=>!removed.has(o.clientId)),clients);
   const accounts=changes.hidden.includes("demo-google")?[]:[{id:"demo-google",email:"analytics@example.com",connectedAt:base.dataAsOf}];
   const count=mentions.length, mentionsCount=mentions.filter(x=>x.mentioned).length, citations=mentions.filter(x=>x.cited).length;
   return {...base,clients,bindings,mentions,evidence:mentions,signals,checks:base.checks.filter(c=>activeIds.has(c.bindingId)),
     google:{configured:true,setup:{ready:true},accounts,bindings},
-    ai:{observations:mentions,samplingAvailable:false,dailyLimit:3,remaining:3,summary:{samples:count,mentions:mentionsCount,citations,mentionRate:count?mentionsCount/count*100:null,citationRate:count?citations/count*100:null}},
+    ai:{observations:mentions,failedRuns:changes.failures.filter(f=>!removed.has(f.clientId)),failedCount:changes.failures.filter(f=>!removed.has(f.clientId)).length,samplingAvailable:false,dailyLimit:3,remaining:3,summary:{samples:count,mentions:mentionsCount,citations,mentionRate:count?mentionsCount/count*100:null,citationRate:count?citations/count*100:null}},
     settings:{scheduleEnabled:changes.scheduleEnabled,frequency:"hourly",lastCheck:changes.lastCheck||base.checkedAt,timezone:"Asia/Kolkata"}};
 }
 
@@ -37,9 +38,28 @@ export async function demoApi(path,options={}){
   if(p==="/api/clients"&&method==="POST"){
     if(state.clients.some(c=>c.domain===body.domain))throw Error("This domain already belongs to a sample client.");
     changes.clients.push({id,name:body.name,domain:body.domain,createdAt:now});
+  }else if(/^\/api\/clients\/[^/]+$/.test(p)&&(method==="PATCH"||method==="DELETE")){
+    const target=decodeURIComponent(p.split("/").pop());
+    if(!state.clients.some(c=>c.id===target))throw Error("Sample client not found.");
+    if(method==="DELETE"){changes.removedClients.push(target);changes.clients=changes.clients.filter(c=>c.id!==target);}
+    else{
+      if(body.domain&&state.clients.some(c=>c.domain===body.domain&&c.id!==target))throw Error("This domain already belongs to another sample client.");
+      const edit={...body,updatedAt:now};const own=changes.clients.find(c=>c.id===target);
+      if(own)Object.assign(own,edit);else changes.clientEdits[target]={...(changes.clientEdits[target]||{}),...edit};
+    }
   }else if(p==="/api/alerts/check"){changes.lastCheck=now;}
-  else if(p.startsWith("/api/alerts/")&&method==="PATCH"){changes.statuses[p.split("/").pop()]=body.status;}
-  else if(p==="/api/settings"&&method==="PATCH"){changes.scheduleEnabled=body.scheduleEnabled;}
+  else if(p.startsWith("/api/alerts/")&&method==="PATCH"){
+    const target=p.split("/").pop(),edit={...(changes.signalEdits[target]||{})};
+    if(body.status==="resolved"&&!body.note)throw Error("Record the fix, its date and the evidence you verified before resolving this signal.");
+    if(body.status){changes.statuses[target]=body.status;if(body.status==="acknowledged")edit.acknowledgedAt=edit.acknowledgedAt||now;if(body.status==="resolved"){edit.resolvedAt=now;edit.resolutionNote=body.note;}}
+    if("assignee" in body)edit.assignee=body.assignee;
+    if("outcome" in body)edit.outcome=body.outcome;
+    changes.signalEdits[target]=edit;result={alert:{id:target,...edit},events:[]};
+  }else if(p==="/api/ai/failures"){
+    changes.failures.unshift({id,clientId:body.clientId,engine:body.engine,prompt:body.prompt,promptType:body.promptType,error:body.error,method:"manual",attemptedAt:now});
+  }else if(p==="/api/google/breakdown"){
+    throw Error("Page, query and channel breakdowns read Google directly. Open the live workspace to use them.");
+  }else if(p==="/api/settings"&&method==="PATCH"){changes.scheduleEnabled=body.scheduleEnabled;}
   else if(p==="/api/google/discover"){
     const src=url.searchParams.get("source");
     const resources=state.clients.map(c=>({id:"demo-"+c.id+"-"+src,label:c.domain,description:"Example property"}));

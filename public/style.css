@@ -15,3 +15,7 @@
 @media(max-width:570px){.ov-grid{grid-template-columns:1fr;margin:12px 0}.ov-graph-wrap{height:180px;flex:auto}.ov-sig-row{padding:11px 0}.ov-sig-list{padding-bottom:3px}.ov-table-head{gap:10px;align-items:flex-start}.ov-table-head p{max-width:24ch}.ov-search{height:31px}.ov-search input{width:79px}.desk-topbar .desk-primary .desk-connect-text{display:none}.desk-topbar .desk-primary{width:32px;padding:0}.ov-legend{padding-top:10px}.desk-view{padding-left:13px;padding-right:13px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
 .ov-empty[hidden]{display:none}.ov-source{text-decoration:none}.ov-message{padding:11px 13px;border:1px solid #d6e3d4;border-radius:8px;background:#edf4e9;display:flex;align-items:center;gap:8px;margin:0 0 14px;font-size:.83rem;line-height:1.4}.ov-message .desk-button{margin-left:auto}.ov-footnote{color:#738075;font-size:.75rem;line-height:1.45;margin:15px 2px 0}
+/* Completed-period metrics row */
+.ov-period{grid-template-columns:repeat(5,minmax(0,1fr));margin-top:13px}.ov-period .ov-metric-value{font-size:clamp(1.35rem,1.9vw,1.95rem)}
+@media(max-width:1150px){.ov-period{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:760px){.ov-period{grid-template-columns:repeat(2,minmax(0,1fr))}}

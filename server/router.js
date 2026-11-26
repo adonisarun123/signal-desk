@@ -2,6 +2,7 @@ import { handleGoogle } from "./google.js";
 import { healthApi } from "./health.js";
 import { aiApi } from "./ai.js";
 import { handleJobRequest } from "./jobs.js";
+import { clientsApi } from "./clients.js";
 
 function reply(body, status = 200) {
   return Response.json(body, {status, headers: {"Cache-Control":"private, no-store","X-Content-Type-Options":"nosniff"}});
@@ -11,17 +12,6 @@ async function readBody(request) {
   const body = await request.json().catch(() => null);
   if (!body || typeof body !== "object" || Array.isArray(body)) return null;
   return body;
-}
-
-function hostname(input) {
-  if (typeof input !== "string" || input.length > 500) return null;
-  try {
-    const url = new URL(input.includes("://") ? input.trim() : "https://" + input.trim());
-    const domain = url.hostname.toLowerCase().replace(/^www\./,"").replace(/\.$/,"");
-    if (!["http:","https:"].includes(url.protocol) || url.username || url.password || url.port) return null;
-    if (!/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)) return null;
-    return domain;
-  } catch { return null; }
 }
 
 async function getSettings(env,owner) {
@@ -46,23 +36,7 @@ export async function handleApi(request,env) {
     if (path.startsWith("/api/google/")) return await handleGoogle(request,env,owner);
     if (path === "/api/alerts" || path.startsWith("/api/alerts/")) return await healthApi(request,env,owner);
     if (path === "/api/ai" || path.startsWith("/api/ai/")) return await aiApi(request,env,owner);
-    if (path === "/api/clients" && request.method === "GET") {
-      const rows=await env.DB.prepare("SELECT id,name,domain,created_at AS createdAt FROM clients WHERE owner=? ORDER BY name COLLATE NOCASE").bind(owner).all();
-      return reply({clients:rows.results});
-    }
-    if (path === "/api/clients" && request.method === "POST") {
-      const body=await readBody(request);
-      const name=typeof body?.name === "string" ? body.name.trim() : "";
-      const domain=hostname(body?.domain);
-      if (!name || name.length>100 || !domain) return reply({error:"Enter a client name of up to 100 characters and a valid website domain."},400);
-      const client={id:crypto.randomUUID(),name,domain,createdAt:new Date().toISOString()};
-      const added=await env.DB.batch([
-        env.DB.prepare("INSERT INTO clients (id,owner,name,domain,created_at) VALUES(?,?,?,?,?) ON CONFLICT(owner,domain) DO NOTHING").bind(client.id,owner,name,domain,client.createdAt),
-        env.DB.prepare("INSERT INTO desk_settings(owner) VALUES(?) ON CONFLICT(owner) DO NOTHING").bind(owner),
-      ]);
-      if (added[0].meta.changes===0) return reply({error:"This domain already belongs to a client in your workspace."},409);
-      return reply({client},201);
-    }
+    if (path === "/api/clients" || path.startsWith("/api/clients/")) return await clientsApi(request,env,owner);
     if (path === "/api/settings") {
       if (request.method === "PATCH") {
         const body=await readBody(request);

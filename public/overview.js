@@ -172,14 +172,14 @@ export function composeOverview(state={}){
   const allObserved=state.mentions||state.evidence||[];
   const observed=allObserved.filter(o=>ids.has(o.clientId));
   const metrics={};
-  for(const key of ['clicks','impressions']){
-    const series=pointsFor(gsc,allDays,key);
+  const compare=(list,key)=>{
+    const series=pointsFor(list,allDays,key);
     const split=series.slice(range),previous=series.slice(0,range);
     const cur=sumKnown(split),prev=sumKnown(previous);
     // Compare only matched source/day pairs. Partial provider coverage can otherwise
-    // produce misleading changes, especially at the lagging end of a GSC window.
+    // produce misleading changes, especially at the lagging end of a reporting window.
     const currPairs=[],prevPairs=[];let currentCount=0;
-    for(const b of gsc){
+    for(const b of list){
       const byDate=new Map((b.points||[]).map(r=>[r.date,r[key]]));
       for(let i=0;i<range;i++){
         const a=byDate.get(days[i]),p=byDate.get(priorDays[i]);
@@ -190,7 +190,28 @@ export function composeOverview(state={}){
     const comparable=sumKnown(prevPairs),matched=sumKnown(currPairs);
     // Keep the headline percentage on the same population as the headline count.
     const delta=numeric(cur)&&currentCount===currPairs.length&&comparable>0?(matched/comparable-1)*100:null;
-    metrics[key]={value:cur,previous:prev,delta,series:split,priorSeries:previous,daysKnown:split.filter(numeric).length};
+    return {value:cur,previous:prev,delta,series:split,priorSeries:previous,daysKnown:split.filter(numeric).length};
+  };
+  for(const key of ['clicks','impressions'])metrics[key]=compare(gsc,key);
+  for(const key of ['sessions','keyEvents','aiSessions'])metrics[key]=compare(ga,key);
+  // Weighted CTR is total clicks / total impressions. Position is impressions-weighted.
+  // Neither averages percentages across clients, and a zero denominator stays unavailable.
+  {
+    let cc=0,ci=0,pc=0,pi=0,cp=0,cpi=0,pp=0,ppi=0,rowsNow=0,pairs=0;
+    const valid=r=>r&&numeric(r.clicks)&&numeric(r.impressions);
+    for(const b of gsc){
+      const byDate=new Map((b.points||[]).map(r=>[r.date,r]));
+      for(let i=0;i<range;i++){
+        const a=byDate.get(days[i]),p=byDate.get(priorDays[i]);
+        if(!valid(a))continue;
+        rowsNow++;cc+=Number(a.clicks);ci+=Number(a.impressions);
+        if(numeric(a.position)&&a.impressions>0){cp+=a.position*a.impressions;cpi+=Number(a.impressions)}
+        if(valid(p)){pairs++;pc+=Number(p.clicks);pi+=Number(p.impressions);if(numeric(p.position)&&p.impressions>0){pp+=p.position*p.impressions;ppi+=Number(p.impressions)}}
+      }
+    }
+    const full=rowsNow>0&&pairs===rowsNow;
+    metrics.ctr={value:ci>0?cc/ci:null,previous:full&&pi>0?pc/pi:null};
+    metrics.position={value:cpi>0?cp/cpi:null,previous:full&&ppi>0?pp/ppi:null};
   }
   const mentionsPerDay=new Map(),samplesPerDay=new Map();
   for(const o of observed){
@@ -256,6 +277,26 @@ function metricsMarkup(vm){
     metricCard('impressions','eye','Search impressions',m.impressions.value,changeLine(m.impressions),spark(m.impressions.series,'#9b85b8'))+
     metricCard('mentions','spark','AI mentions',m.mentions.value,m.mentions.truncated?'Within latest 200 answers':m.mentions.samples?'Across '+exact(m.mentions.samples)+' recorded answers':'Awaiting AI observations','')+'</section>';
 }
+function periodChange(data,kind){
+  if(kind==='ctr'||kind==='position'){
+    if(!numeric(data.value)||!numeric(data.previous))return numeric(data.value)?'Previous period not comparable':'Awaiting Search Console';
+    const diff=kind==='ctr'?(data.value-data.previous)*100:data.value-data.previous;
+    const better=kind==='ctr'?diff>=0:diff<=0;
+    return '<span class="ov-change'+(better?'':' negative')+'">'+icon(diff<0?'down':'up',13)+(diff>0?'+':'')+diff.toFixed(kind==='ctr'?2:1)+(kind==='ctr'?' pp':'')+'</span><span>vs previous period</span>';
+  }
+  if(data.delta===null)return data.daysKnown?data.daysKnown+' reporting days':'Awaiting Analytics';
+  return changeLine(data);
+}
+function periodMarkup(vm){
+  const m=vm.metrics,pct=v=>numeric(v)?(v*100).toFixed(2)+'%':'—',pos=v=>numeric(v)?v.toFixed(1):'—';
+  const card=(type,ico,title,display,exactValue,context)=>'<article class="ov-card"><div class="ov-card-top"><span class="ov-metric-icon '+type+'">'+icon(ico,16)+'</span><span>'+title+'</span></div><div class="ov-value-line"><strong class="ov-metric-value" title="'+html(exactValue)+'">'+display+'</strong></div><div class="ov-context">'+context+'</div></article>';
+  return '<section class="ov-metrics ov-period" aria-label="Completed reporting period">'+
+    card('active','activity','Sessions',small(m.sessions.value),exact(m.sessions.value),periodChange(m.sessions))+
+    card('mentions','checkCircle','Key events',small(m.keyEvents.value),exact(m.keyEvents.value),periodChange(m.keyEvents))+
+    card('clicks','mouse','Weighted CTR',pct(m.ctr.value),'Total clicks ÷ total impressions',periodChange(m.ctr,'ctr'))+
+    card('impressions','up','Avg. position',pos(m.position.value),'Impressions-weighted',periodChange(m.position,'position'))+
+    card('mentions','spark','AI referral sessions',small(m.aiSessions.value),exact(m.aiSessions.value),periodChange(m.aiSessions))+'</section>';
+}
 function selectWrap(label,action,options,selected,ico){
   return '<label class="desk-select-wrap'+(ico?'':' is-compact')+'"><span class="desk-sr">'+html(label)+'</span>'+(ico?icon(ico,14):'')+'<select '+(action==='chart-metric'?'id="ov-metric-select"':'data-desk-change="'+action+'"')+' aria-label="'+html(label)+'">'+options.map(([v,text])=>'<option value="'+html(v)+'"'+(String(selected)===String(v)?' selected':'')+'>'+html(text)+'</option>').join('')+'</select>'+icon('chevronDown',13)+'</label>';
 }
@@ -319,7 +360,7 @@ export function renderOverview(state={}){
   const options=[['all','All clients'],...vm.allClients.map(c=>[c.id,c.name])];
   const demo=state.mode!=='live';
   const banner=state.loading?'<div class="ov-message" role="status">'+icon('refresh',16)+' Loading workspace data…</div>':'';
-  view.innerHTML='<div class="ov-intro"><div><h1>Portfolio overview</h1><p>Traffic, visibility and health across your client portfolio.</p></div><div class="ov-filters">'+selectWrap('Filter by client','client',options,vm.selected,'briefcase')+selectWrap('Reporting period','range',[[7,'Last 7 days'],[28,'Last 28 days'],[90,'Last 90 days']],vm.range,'calendar')+'</div></div>'+banner+metricsMarkup(vm)+'<div class="ov-grid"><section class="ov-panel ov-chart-panel"><div class="ov-panel-head"><div><h2>Search performance</h2><p>Organic search '+(metricChoice==='clicks'?'clicks':'impressions')+' over time.</p></div>'+selectWrap('Chart metric','chart-metric',[['clicks','Clicks'],['impressions','Impressions']],metricChoice,'')+'</div><div class="ov-legend"><span><i></i>Current period</span><span><i></i>Previous period</span></div><div id="ov-plot" class="ov-graph-wrap"></div></section>'+signalPanel(vm)+'</div>'+tableMarkup(vm)+'<p class="ov-footnote">'+(demo?'Illustrative workspace data. Switch to the live workspace to monitor connected client accounts.':'Realtime counts use Google Analytics’ last 30 minutes. Daily Search Console totals reflect available reporting days.')+'</p>';
+  view.innerHTML='<div class="ov-intro"><div><h1>Portfolio overview</h1><p>Traffic, visibility and health across your client portfolio.</p></div><div class="ov-filters">'+selectWrap('Filter by client','client',options,vm.selected,'briefcase')+selectWrap('Reporting period','range',[[7,'Last 7 days'],[28,'Last 28 days'],[90,'Last 90 days']],vm.range,'calendar')+'</div></div>'+banner+metricsMarkup(vm)+periodMarkup(vm)+'<div class="ov-grid"><section class="ov-panel ov-chart-panel"><div class="ov-panel-head"><div><h2>Search performance</h2><p>Organic search '+(metricChoice==='clicks'?'clicks':'impressions')+' over time.</p></div>'+selectWrap('Chart metric','chart-metric',[['clicks','Clicks'],['impressions','Impressions']],metricChoice,'')+'</div><div class="ov-legend"><span><i></i>Current period</span><span><i></i>Previous period</span></div><div id="ov-plot" class="ov-graph-wrap"></div></section>'+signalPanel(vm)+'</div>'+tableMarkup(vm)+'<p class="ov-footnote">'+(demo?'Illustrative workspace data. Switch to the live workspace to monitor connected client accounts.':'Realtime counts use Google Analytics’ last 30 minutes. Daily Search Console totals reflect available reporting days.')+'</p>';
   const box=document.getElementById('ov-plot');drawGraph(box,vm);
   if(typeof ResizeObserver!=='undefined'){
     let oldW=box.clientWidth,oldH=box.clientHeight;

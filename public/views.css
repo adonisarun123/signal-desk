@@ -134,3 +134,7 @@
 .sdv-readings strong{display:block;font-size:1.18rem;font-weight:650;letter-spacing:-.025em;font-variant-numeric:tabular-nums}
 @media(max-width:730px){.sdv-readings{grid-template-columns:repeat(2,minmax(0,1fr))}}
 .work-error{display:flex;align-items:center;justify-content:space-between;gap:1rem;margin:.4rem 0 1rem;padding:.8rem 1rem;border:1px solid #edc89d;background:#fff7e8;color:#784916;border-radius:8px;font-size:.9rem}.work-error button{border:1px solid #d2b388;border-radius:5px;padding:.3rem .65rem;color:inherit;background:white;cursor:pointer}
+/* Labels laid out side by side in a dialog keep the same top spacing. */
+.sdv-dialog .sdv-grid>label{margin-top:12px}
+.sdv-dialog form>.sdv-grid:first-child>label{margin-top:0}
+.sdv-dialog ul.sdv-note{margin:8px 0 0;padding-left:20px;line-height:1.6}

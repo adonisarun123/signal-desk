@@ -1,4 +1,4 @@
-import {GoogleIssue, checkSource, checkResource, discover, resourceInfo, daily, realtime, businessPoints, nowIso} from './google-provider.js';
+import {GoogleIssue, checkSource, checkResource, discover, resourceInfo, daily, realtime, businessPoints, nowIso, breakdown} from './google-provider.js';
 import {initGoogle, allRows, userAccount, accountById, getToken, googleSetup, requireSetup, startOAuth, finishOAuth, googleEnv, saveGoogleConfig, sealBusinessCache, openBusinessCache} from './google-storage.js';
 export {initGoogle,googleSetup};
 
@@ -158,6 +158,29 @@ async function refreshBinding(env,owner,binding,quick,tokenFor) {
     return {id,status:'error',error:msg,code:e.code || 'SYNC_FAILED'};
   }
 }
+function reportDay(value,label) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new GoogleIssue(400,'INVALID_DATE','Choose a valid '+label+'.');
+  const t = Date.parse(value+'T00:00:00Z');
+  if (!Number.isFinite(t) || !new Date(t).toISOString().startsWith(value)) throw new GoogleIssue(400,'INVALID_DATE','Choose a valid '+label+'.');
+  const age = (Date.now()-t)/86400000;
+  if (age < 0 || age > 480) throw new GoogleIssue(400,'INVALID_DATE','The '+label+' must be a completed day within the last 16 months.');
+  return value;
+}
+async function locate(env,owner,params) {
+  requireSetup(env);
+  const id = identifier(params.get('bindingId'),'mapping');
+  const row = await env.DB.prepare('SELECT * FROM google_bindings WHERE owner=? AND id=?').bind(owner,id).first();
+  if (!row) throw new GoogleIssue(404,'BINDING_NOT_FOUND','Mapping not found in this workspace.');
+  if (row.source === 'gbp') throw new GoogleIssue(400,'BREAKDOWN_UNSUPPORTED','Breakdowns are available for Analytics and Search Console properties.');
+  const date = reportDay(params.get('date'),'reporting date');
+  const fallback = new Date(Date.parse(date+'T00:00:00Z')-7*86400000).toISOString().slice(0,10);
+  const compareDate = reportDay(params.get('compareDate') || fallback,'comparison date');
+  if (compareDate === date) throw new GoogleIssue(400,'INVALID_DATE','Choose a comparison date different from the reporting date.');
+  const token = await getToken(env,await accountById(env,owner,row.accountId),row.source);
+  const result = await breakdown(token,row.source,row.resourceId,{dimension:params.get('dimension') || (row.source==='gsc'?'page':'landingPage'),
+    date,compareDate,metric:params.get('metric')});
+  return {bindingId:row.id,clientId:row.clientId,label:row.label,...result};
+}
 // Each pass limits provider requests and rotates oldest attempts first, including failed attempts.
 export async function syncGoogle(env,owner,clientId,options={}) {
   requireOwner(owner);
@@ -166,7 +189,8 @@ export async function syncGoogle(env,owner,clientId,options={}) {
   const quick = options.realtime === true;
   const attemptCol = quick ? 'rtAttempt' : 'lastAttempt';
   const untilCol = quick ? 'rtUntil' : 'leaseUntil';
-  const limit = Math.max(1,Math.min(Number.isInteger(options.limit) ? options.limit : 5,8));
+  // Interactive passes stay small. The scheduler can raise this with SYNC_BATCH_LIMIT as quota allows.
+  const limit = Math.max(1,Math.min(Number.isInteger(options.limit) ? options.limit : 5,25));
   const args = [owner,Date.now(),new Date(Date.now()-(quick ? 55000 : 300000)).toISOString()];
   let where = `owner=? AND ${untilCol}<=? AND (${attemptCol} IS NULL OR ${attemptCol}<=?)`;
   if (clientId) {where += ' AND clientId=?';args.push(clientId);}
@@ -215,6 +239,7 @@ export async function handleGoogle(request,env,owner) {
       return output(await discover(await getToken(env,a,source),source,url.searchParams.get('pageToken')));
     }
     if (request.method === 'POST' && route === 'bindings') return output(await bind(env,owner,await body(request)),201);
+    if (request.method === 'GET' && route === 'breakdown') return output(await locate(env,owner,url.searchParams));
     if (request.method === 'GET' && route === 'data') return output(await readGoogle(env,owner,url.searchParams.get('clientId')));
     if (request.method === 'POST' && ['sync','realtime'].includes(route)) {
       const {clientId} = await body(request);

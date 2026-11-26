@@ -31,6 +31,9 @@ export async function handleJobRequest(req,env,owner) {
     const existing=await db.prepare("SELECT * FROM desk_job_runs WHERE bucket=?").bind(bucket).first();
     return response({run:describe(existing),alreadyRun:true});
   }
+  // SYNC_BATCH_LIMIT raises the per-workspace pass size (1-25) as client count and quota allow.
+  const configured=Number.parseInt(env.SYNC_BATCH_LIMIT ?? "",10);
+  const batchLimit=Number.isInteger(configured)?Math.max(1,Math.min(configured,25)):5;
   const totals={workspaces:0,connections:0,synced:0,failed:0,partial:0,workspacesWithBacklog:0,newCritical:0,newWarnings:0};
   const workspaces=await db.prepare("SELECT owner FROM desk_settings WHERE schedule_enabled=1 ORDER BY COALESCE(last_check,'') LIMIT 8").all();
   for (const {owner:tenant} of workspaces.results) {
@@ -39,7 +42,7 @@ export async function handleJobRequest(req,env,owner) {
       const bound=await readGoogle(env,tenant);
       totals.connections+=bound.bindings.length;
       if (bound.bindings.length) {
-        const sync=await syncGoogle(env,tenant);
+        const sync=await syncGoogle(env,tenant,undefined,{limit:batchLimit});
         const results=sync.results||[];
         totals.synced+=results.filter(row=>row.status==="synced").length;
         totals.failed+=results.filter(row=>row.status==="error").length;
@@ -55,7 +58,7 @@ export async function handleJobRequest(req,env,owner) {
       await db.prepare("UPDATE desk_settings SET last_check=? WHERE owner=?").bind(new Date().toISOString(),tenant).run();
     } catch { totals.failed++; }
   }
-  const result={status:(totals.failed || totals.partial) ? "partial" : "complete",...totals};
+  const result={status:(totals.failed || totals.partial) ? "partial" : "complete",batchLimit,...totals};
   const end=new Date().toISOString();
   await db.batch([
     db.prepare("UPDATE desk_job_runs SET result=?,finished_at=? WHERE bucket=? AND lease=?").bind(JSON.stringify(result),end,bucket,lease),

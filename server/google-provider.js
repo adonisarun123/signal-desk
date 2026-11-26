@@ -176,3 +176,54 @@ export function businessPoints(raw) {
     return p;
   }).sort(order);
 }
+
+// Date-matched breakdowns locate a change from the signal itself. They are read on
+// demand for two single reporting days and are not stored.
+export const breakdownDimensions = {
+  gsc: { page: 'page', query: 'query', country: 'country', device: 'device' },
+  ga4: { landingPage: 'landingPage', channel: 'sessionDefaultChannelGroup', device: 'deviceCategory', country: 'country' }
+};
+const ROW_LIMIT = 250;
+async function oneDay(token, source, resource, dimension, date) {
+  if (source === 'gsc') {
+    const r = await api(gscRoot + '/' + encodeURIComponent(resource) + '/searchAnalytics/query', token, {
+      startDate:date,endDate:date,dimensions:[dimension],type:'web',dataState:'final',rowLimit:ROW_LIMIT});
+    return (r.rows || []).map(row => ({key:row.keys[0],clicks:row.clicks,impressions:row.impressions,position:row.position}));
+  }
+  const r = await api(gaData + '/' + resource + ':runReport', token, {dateRanges:[{startDate:date,endDate:date}],
+    dimensions:[{name:dimension}],metrics:[{name:'sessions'},{name:'keyEvents'}],limit:String(ROW_LIMIT),
+    orderBys:[{metric:{metricName:'sessions'},desc:true}]});
+  return (r.rows || []).map(row => ({key:row.dimensionValues[0].value,sessions:metric(row,0),keyEvents:metric(row,1)}));
+}
+export async function breakdown(token, source, resource, {dimension, date, compareDate, metric: focus}) {
+  checkResource(source, resource);
+  const names = breakdownDimensions[source];
+  if (!names) throw issue(400,'BREAKDOWN_UNSUPPORTED','Breakdowns are available for Analytics and Search Console properties.');
+  if (!Object.hasOwn(names, dimension)) throw issue(400,'INVALID_DIMENSION','Choose one of: ' + Object.keys(names).join(', ') + '.');
+  const metrics = source === 'gsc' ? ['clicks','impressions'] : ['sessions','keyEvents'];
+  const sortBy = metrics.includes(focus) ? focus : metrics[0];
+  const [current, previous] = await Promise.all([oneDay(token,source,resource,names[dimension],date), oneDay(token,source,resource,names[dimension],compareDate)]);
+  const rows = new Map();
+  const add = (list, slot) => { for (const r of list) { const row = rows.get(r.key) || {key:r.key,current:null,previous:null}; row[slot] = r; rows.set(r.key,row); } };
+  add(current,'current'); add(previous,'previous');
+  const value = (side, m) => side ? side[m] ?? 0 : 0;
+  const total = (list, m) => list.reduce((n,r) => n + (r[m] ?? 0), 0);
+  const result = [...rows.values()].map(row => {
+    const out = {key:row.key};
+    for (const m of metrics) { out[m] = value(row.current,m); out[m + 'Previous'] = value(row.previous,m); out[m + 'Change'] = out[m] - out[m + 'Previous']; }
+    if (source === 'gsc') {
+      out.ctr = out.impressions ? out.clicks / out.impressions : null;
+      out.ctrPrevious = out.impressionsPrevious ? out.clicksPrevious / out.impressionsPrevious : null;
+      out.position = row.current?.position ?? null; out.positionPrevious = row.previous?.position ?? null;
+    }
+    return out;
+  }).sort((a,b) => Math.abs(b[sortBy + 'Change']) - Math.abs(a[sortBy + 'Change']) || a.key.localeCompare(b.key)).slice(0,50);
+  return {
+    source, dimension, date, compareDate, metric: sortBy, rows: result,
+    totals: Object.fromEntries(metrics.flatMap(m => [[m,total(current,m)],[m + 'Previous',total(previous,m)]])),
+    truncated: current.length >= ROW_LIMIT || previous.length >= ROW_LIMIT,
+    note: source === 'gsc'
+      ? 'Final web data in Pacific reporting dates. Search Console omits anonymised queries, so query rows can total less than the property.'
+      : 'GA4 rows use the property time zone. Recent days can still be revised while processing completes.'
+  };
+}

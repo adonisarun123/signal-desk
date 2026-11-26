@@ -3,6 +3,8 @@ import { getClient, handleInputError, InputError, json, readObject, requiredText
 const DAILY_LIMIT = 3;
 const prepared = new WeakSet();
 const MAX_CITATIONS = 40;
+export const PROMPT_TYPES = ["branded", "discovery"];
+const OBSERVATION_COLUMNS = { prompt_type: "TEXT", language: "TEXT", city: "TEXT" };
 
 export async function ensureAi(env) {
   if (prepared.has(env.DB)) return;
@@ -14,7 +16,16 @@ export async function ensureAi(env) {
     env.DB.prepare("CREATE INDEX IF NOT EXISTS ai_obs_owner_client_date ON ai_observations(owner,client_id,observed_at)"),
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS ai_sample_attempts (
       owner TEXT NOT NULL, day TEXT NOT NULL, token TEXT NOT NULL, PRIMARY KEY(owner,day,token))`),
+    // Unsuccessful runs are evidence of collection problems, never part of the sample count.
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS ai_failed_runs (
+      id TEXT PRIMARY KEY, owner TEXT NOT NULL, client_id TEXT NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      engine TEXT NOT NULL, prompt TEXT NOT NULL, prompt_type TEXT, error TEXT NOT NULL, method TEXT NOT NULL, attempted_at TEXT NOT NULL)`),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS ai_failed_owner_client ON ai_failed_runs(owner,client_id,attempted_at)"),
   ]);
+  const info = await env.DB.prepare("PRAGMA table_info(ai_observations)").all();
+  const have = new Set((info.results || []).map(row => row.name));
+  const missing = Object.entries(OBSERVATION_COLUMNS).filter(([name]) => !have.has(name));
+  if (missing.length) await env.DB.batch(missing.map(([name,type]) => env.DB.prepare(`ALTER TABLE ai_observations ADD COLUMN ${name} ${type}`)));
   prepared.add(env.DB);
 }
 
@@ -68,22 +79,75 @@ export function classifyEvidence(client, answer, citations) {
 
 function record(row) {
   return { id: row.id, clientId: row.client_id, engine: row.engine, model: row.model, prompt: row.prompt, answer: row.answer,
-    citations: JSON.parse(row.citations), mentioned: !!row.mentioned, cited: !!row.cited, method: row.method, observedAt: row.observed_at };
+    citations: JSON.parse(row.citations), mentioned: !!row.mentioned, cited: !!row.cited, method: row.method, observedAt: row.observed_at,
+    promptType: row.prompt_type ?? null, language: row.language ?? null, city: row.city ?? null };
 }
 
-export async function readAi(env, owner, clientId) {
+function failedRow(row) {
+  return { id: row.id, clientId: row.client_id, engine: row.engine, prompt: row.prompt, promptType: row.prompt_type ?? null,
+    error: row.error, method: row.method, attemptedAt: row.attempted_at };
+}
+
+/** Rates compare like with like: one client, one prompt type and one period at a time. */
+export function aiFilters(params) {
+  const filters = {};
+  const days = params.get("days");
+  if (days !== null && days !== "" && days !== "all") {
+    if (!["7","28","90"].includes(days)) throw new InputError("Choose a period of 7, 28 or 90 days.");
+    filters.since = new Date(Date.now() - Number(days) * 86_400_000).toISOString();
+  }
+  const type = params.get("promptType");
+  if (type !== null && type !== "" && type !== "all") {
+    if (!PROMPT_TYPES.includes(type)) throw new InputError("Choose a branded or discovery prompt type.");
+    filters.promptType = type;
+  }
+  const engine = params.get("engine");
+  if (engine) filters.engine = requiredText(engine, "AI engine", 80);
+  return filters;
+}
+
+function promptType(value) {
+  if (value === undefined || value === null || value === "") return null;
+  if (!PROMPT_TYPES.includes(value)) throw new InputError("Prompt type must be branded or discovery.");
+  return value;
+}
+
+function optionalLabel(value, name, limit) {
+  if (value === undefined || value === null || value === "") return null;
+  return requiredText(value, name, limit);
+}
+
+export async function readAi(env, owner, clientId, filters = {}) {
   await ensureAi(env);
-  const params = clientId ? [owner,clientId] : [owner];
-  const where = clientId ? "owner=? AND client_id=?" : "owner=?";
+  const clauses = ["owner=?"], params = [owner];
+  if (clientId) { clauses.push("client_id=?"); params.push(clientId); }
+  if (filters.promptType) { clauses.push("prompt_type=?"); params.push(filters.promptType); }
+  const failClauses = [...clauses], failParams = [...params];
+  if (filters.engine) { clauses.push("engine=?"); params.push(filters.engine); failClauses.push("engine=?"); failParams.push(filters.engine); }
+  if (filters.since) { clauses.push("observed_at>=?"); params.push(filters.since); failClauses.push("attempted_at>=?"); failParams.push(filters.since); }
+  const where = clauses.join(" AND "), failWhere = failClauses.join(" AND ");
   const day = new Date().toISOString().slice(0,10);
-  const [list, counts, attempts] = await Promise.all([
+  const [list, counts, attempts, failed, failedCount] = await Promise.all([
     env.DB.prepare(`SELECT * FROM ai_observations WHERE ${where} ORDER BY observed_at DESC,created_at DESC LIMIT 200`).bind(...params).all(),
     env.DB.prepare(`SELECT COUNT(*) samples, COALESCE(SUM(mentioned),0) mentions, COALESCE(SUM(cited),0) citations FROM ai_observations WHERE ${where}`).bind(...params).first(),
     env.DB.prepare("SELECT COUNT(*) used FROM ai_sample_attempts WHERE owner=? AND day=?").bind(owner,day).first(),
+    env.DB.prepare(`SELECT * FROM ai_failed_runs WHERE ${failWhere} ORDER BY attempted_at DESC LIMIT 50`).bind(...failParams).all(),
+    env.DB.prepare(`SELECT COUNT(*) n FROM ai_failed_runs WHERE ${failWhere}`).bind(...failParams).first(),
   ]);
   const rate = value => counts.samples ? Math.round(1000 * value / counts.samples) / 10 : null;
   return { observations: list.results.map(record), summary: { ...counts, mentionRate: rate(counts.mentions), citationRate: rate(counts.citations) },
+    failedRuns: failed.results.map(failedRow), failedCount: failedCount.n,
+    filters: { days: filters.since ? Math.round((Date.now() - Date.parse(filters.since)) / 86_400_000) : null, promptType: filters.promptType ?? null, engine: filters.engine ?? null },
     samplingAvailable: !!env.OPENAI_API_KEY, dailyLimit: DAILY_LIMIT, remaining: Math.max(0,DAILY_LIMIT-attempts.used) };
+}
+
+async function recordFailure(env, owner, client, data) {
+  const row = { id: crypto.randomUUID(), owner, client_id: client.id, engine: data.engine, prompt: data.prompt,
+    prompt_type: data.promptType ?? null, error: String(data.error).slice(0,500), method: data.method, attempted_at: data.attemptedAt || new Date().toISOString() };
+  const keys = Object.keys(row);
+  const saved = await env.DB.prepare(`INSERT INTO ai_failed_runs (${keys.join(",")}) VALUES (${keys.map(()=>"?").join(",")}) RETURNING *`)
+    .bind(...keys.map(k => row[k])).first();
+  return failedRow(saved);
 }
 
 async function storeEvidence(env, owner, client, data) {
@@ -97,11 +161,14 @@ async function storeEvidence(env, owner, client, data) {
   const recorded = new Date();
   const when = data.observedAt === undefined ? recorded : new Date(data.observedAt);
   if (!Number.isFinite(when.getTime()) || when.getTime() <= 0 || when.getTime() > recorded.getTime() + 300_000) throw new InputError("Enter a valid observation date in the past.");
+  const type = promptType(data.promptType);
+  const language = optionalLabel(data.language, "Language", 40);
+  const city = optionalLabel(data.city, "City", 80);
   const id = crypto.randomUUID();
   const saved = await env.DB.prepare(`INSERT INTO ai_observations
-    (id,owner,client_id,engine,model,prompt,answer,citations,mentioned,cited,observed_at,method,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *`).bind(id,owner,client.id,engine,model,prompt,answer,JSON.stringify(citations),
-    Number(evaluated.mentioned),Number(evaluated.cited),when.toISOString(),data.method,recorded.toISOString()).first();
+    (id,owner,client_id,engine,model,prompt,answer,citations,mentioned,cited,observed_at,method,created_at,prompt_type,language,city)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING *`).bind(id,owner,client.id,engine,model,prompt,answer,JSON.stringify(citations),
+    Number(evaluated.mentioned),Number(evaluated.cited),when.toISOString(),data.method,recorded.toISOString(),type,language,city).first();
   return record(saved);
 }
 
@@ -129,7 +196,11 @@ export function extractSample(result) {
   return { answer, citations: citations.slice(0,MAX_CITATIONS) };
 }
 
-async function sample(env, owner, client, prompt, requestToken) {
+async function sample(env, owner, client, prompt, requestToken, meta = {}) {
+  // Validate everything stored with the answer before a paid request is made.
+  promptType(meta.promptType);
+  optionalLabel(meta.language, "Language", 40);
+  optionalLabel(meta.city, "City", 80);
   if (!env.OPENAI_API_KEY) throw new InputError("Add a server-side OpenAI API key to enable paid sampling.",503);
   const token = requestToken ? requiredText(requestToken,"Request identifier",100) : crypto.randomUUID();
   const model = env.OPENAI_MODEL || "gpt-5.4-mini";
@@ -142,6 +213,17 @@ async function sample(env, owner, client, prompt, requestToken) {
     const duplicate = await env.DB.prepare("SELECT token FROM ai_sample_attempts WHERE owner=? AND day=? AND token=?").bind(owner,today,token).first();
     throw new InputError(duplicate ? "This sample request was already submitted." : "The workspace has used its three sample attempts for this UTC day.", duplicate ? 409 : 429);
   }
+  try {
+    return await runSample(env, owner, client, prompt, model, meta);
+  } catch (error) {
+    // The attempt was reserved and may have been billed. Keep it out of the sample count but visible.
+    if (error instanceof InputError) await recordFailure(env, owner, client, { engine: "OpenAI web search", prompt,
+      promptType: meta.promptType || null, error: error.message, method: "api" }).catch(() => {});
+    throw error;
+  }
+}
+
+async function runSample(env, owner, client, prompt, model, meta) {
   let response;
   try {
     response = await fetch("https://api.openai.com/v1/responses", {
@@ -156,7 +238,8 @@ async function sample(env, owner, client, prompt, requestToken) {
   let result;
   try { result = await response.json(); } catch { throw new InputError("The provider returned an unreadable response.",502); }
   const parsed = extractSample(result);
-  return storeEvidence(env,owner,client,{ ...parsed, prompt, engine: "OpenAI web search", model: result.model || model, method:"api" });
+  return storeEvidence(env,owner,client,{ ...parsed, prompt, engine: "OpenAI web search", model: result.model || model, method:"api",
+    promptType: meta.promptType, language: meta.language, city: meta.city });
 }
 
 export async function aiApi(request,env,owner) {
@@ -168,13 +251,23 @@ export async function aiApi(request,env,owner) {
     if (url.pathname === "/api/ai" && request.method === "GET") {
       const id = url.searchParams.get("clientId");
       if (id) await getClient(env,owner,id);
-      return json(await readAi(env,owner,id));
+      return json(await readAi(env,owner,id,aiFilters(url.searchParams)));
+    }
+    if (request.method === "POST" && url.pathname === "/api/ai/failures") {
+      // A manual run where the engine errored, refused or returned nothing usable.
+      const body = await readObject(request);
+      const client = await getClient(env,owner,body.clientId);
+      const failure = await recordFailure(env,owner,client,{ engine: requiredText(body.engine,"AI engine",80),
+        prompt: requiredText(body.prompt,"Prompt",1000), promptType: promptType(body.promptType),
+        error: requiredText(body.error || "No usable answer was returned.","Failure description",500), method: "manual" });
+      return json({failure},201);
     }
     if (request.method === "POST" && ["/api/ai/observations","/api/ai/sample"].includes(url.pathname)) {
       const body = await readObject(request);
       const client = await getClient(env,owner,body.clientId);
       const observation = url.pathname.endsWith("/sample")
-        ? await sample(env,owner,client,requiredText(body.prompt,"Prompt",1000),request.headers.get("Idempotency-Key"))
+        ? await sample(env,owner,client,requiredText(body.prompt,"Prompt",1000),request.headers.get("Idempotency-Key"),
+          { promptType: body.promptType, language: body.language, city: body.city })
         : await storeEvidence(env,owner,client,{ ...body, method: "manual" });
       return json({observation},201);
     }
