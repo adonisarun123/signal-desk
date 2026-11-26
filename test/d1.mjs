@@ -1,6 +1,14 @@
-// SQLite-backed subset of Cloudflare D1 used by the integration suite.
+// Test database for the integration suites.
+// Default: an in-memory SQLite subset of Cloudflare D1 (fast, no dependencies).
+// SIGNAL_DESK_TEST_DB=pglite: in-process PostgreSQL through the production D1 adapter
+// (server/pg-d1.js), so the same suites exercise the Neon code path.
 import { readdirSync, readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { createD1 } from '../server/pg-d1.js';
+
+const migrationDir = new URL('../db/migrations/', import.meta.url);
+const migrationSql = () => readdirSync(migrationDir).filter(name => name.endsWith('.sql')).sort()
+  .map(name => readFileSync(new URL(name, migrationDir), 'utf8')).join('\n');
 
 function wrap(database, query, values = []) {
   function execute() {
@@ -29,15 +37,10 @@ function wrap(database, query, values = []) {
   };
 }
 
-export function memoryD1({migrations = false} = {}) {
+function sqliteD1(migrations) {
   const database = new DatabaseSync(':memory:');
   database.exec('PRAGMA foreign_keys=ON');
-  if (migrations) {
-    const directory = new URL('../drizzle/', import.meta.url);
-    for (const name of readdirSync(directory).filter(name => name.endsWith('.sql')).sort()) {
-      database.exec(readFileSync(new URL(name, directory), 'utf8'));
-    }
-  }
+  if (migrations) database.exec(migrationSql());
   return {
     prepare(query) { return wrap(database, query); },
     async exec(query) { database.exec(query); return { count: 1, duration: 0 }; },
@@ -54,4 +57,26 @@ export function memoryD1({migrations = false} = {}) {
     },
     close() { database.close(); },
   };
+}
+
+let PGlite;
+if (process.env.SIGNAL_DESK_TEST_DB === 'pglite') ({ PGlite } = await import('@electric-sql/pglite'));
+
+function pgliteD1(migrations) {
+  const db = new PGlite({ parsers: { 20: v => Number(v), 1700: v => Number(v) } });
+  const ready = migrations ? db.exec(migrationSql()) : db.waitReady;
+  const wrap = result => ({ rows: result.rows, rowCount: result.affectedRows ?? result.rows.length });
+  const d1 = createD1({
+    async query(text, params) { await ready; return wrap(await db.query(text, params)); },
+    async transaction(fn) {
+      await ready;
+      return db.transaction(tx => fn(async (text, params) => wrap(await tx.query(text, params))));
+    },
+  });
+  d1.close = () => db.close();
+  return d1;
+}
+
+export function memoryD1({migrations = false} = {}) {
+  return PGlite ? pgliteD1(migrations) : sqliteD1(migrations);
 }

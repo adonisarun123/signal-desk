@@ -7,11 +7,10 @@ function describe(row) {
   return {startedAt:row.started_at,finishedAt:row.finished_at,...(row.result ? JSON.parse(row.result) : {status:"running"})};
 }
 
-// The shared writer is served only behind owner-private Sites dispatch. Its native
-// service credential is consumed at that boundary. The instance flag defaults off.
+// The router admits the tick only with the scheduler's CRON_SECRET (Vercel Cron sends it
+// as a bearer token on a GET). Status is also readable by a signed-in owner.
 // It accepts no tenant, resource, or query selectors and returns only aggregate counts.
-export async function handleJobRequest(req,env,owner) {
-  if (env.PRIVATE_SITE_JOBS !== "enabled") return response({error:"The private scheduled writer is disabled."},403);
+export async function handleJobRequest(req,env) {
   const url=new URL(req.url);
   if (url.search) return response({error:"Job selectors are not supported."},400);
   const db=env.DB;
@@ -19,8 +18,8 @@ export async function handleJobRequest(req,env,owner) {
     const row=await db.prepare("SELECT * FROM desk_job_runs ORDER BY started_at DESC LIMIT 1").first();
     return response({lastRun:describe(row)});
   }
-  if (url.pathname !== "/api/jobs/tick" || req.method !== "POST") return response({error:"Method unavailable."},405);
-  const raw=await req.text();
+  if (url.pathname !== "/api/jobs/tick" || !["GET","POST"].includes(req.method)) return response({error:"Method unavailable."},405);
+  const raw=req.method === "POST" ? await req.text() : "";
   if (raw.trim() && raw.trim() !== "{}") return response({error:"The scheduled check does not accept parameters."},400);
   const now=new Date(), stamp=now.toISOString(), bucket=stamp.slice(0,13);
   const lease=crypto.randomUUID(), expired=new Date(now.getTime()-10*60*1000).toISOString();

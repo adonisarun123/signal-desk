@@ -15,7 +15,7 @@ async function columns(db, table) {
   return new Set((info.results || []).map(row => row.name));
 }
 
-// Hosted deploys apply drizzle/0001 first. This keeps older or locally created
+// `npm run db:migrate` creates these up front. This keeps older or locally created
 // databases compatible without a manual migration.
 export async function ensureClients(env) {
   if (prepared.has(env.DB)) return;

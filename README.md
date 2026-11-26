@@ -1,6 +1,6 @@
 # Signal Desk by Monk Mantra
 
-A private agency dashboard for client Analytics, Search Console, Business Profile, actionable health checks and AI answer evidence. The browser opens in a labelled sample workspace. Live records are stored in D1 behind the authenticated owner's Sites identity. A Google Cloud OAuth web client and consent from each reporting account activate its data.
+A private agency dashboard for client Analytics, Search Console, Business Profile, actionable health checks and AI answer evidence. The browser opens in a labelled sample workspace. Live records are stored in Neon Postgres behind the owner's Google sign-in. A Google Cloud OAuth web client and consent from each reporting account activate its data.
 
 ## Operate the dashboard
 
@@ -15,11 +15,17 @@ See [the implementation scope and operating guide](docs/SCOPE.md), [what is buil
 
 ## Run and test
 
-Use Node 24 or later. Install with npm ci. Run the isolated API, measurement and interface regression suites with npm test. They use an in-memory SQLite adapter and provider fixtures. npm run build compiles the server Worker and client assets. npm run dev starts the Vinext development environment. The demo requires no secrets.
+Use Node 22.13 or later. Install with `npm ci`. `npm test` runs the API, measurement, sign-in and interface regression suites against an in-memory SQLite adapter with provider fixtures; `npm run test:pg` runs the same suites against in-process PostgreSQL (PGlite) through the production database adapter. `npm run dev` starts Next.js on http://localhost:3000 and `npm run build` produces the Vercel build. The demo workspace requires no secrets.
 
-The tracked hosting manifest declares the DB binding. The hosted deploy applies the Drizzle migrations. For local live-mode development, build first and apply each drizzle/*.sql file in filename order with the local Wrangler D1 command documented below. The Google, alert and evidence modules bootstrap their own tables idempotently. Configure local secrets using ignored .dev.vars. See .env.example for field names, including SYNC_BATCH_LIMIT for the scheduled pass size. Sites provides identity headers on authenticated hosted requests. Self-hosters must provide a trusted identity gateway that strips client-supplied identity headers. Leave PRIVATE_SITE_JOBS disabled unless the endpoint is behind a verified owner-private access boundary.
+## Hosting (Vercel + Neon)
 
-    node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0000_parched_harrier.sql
+- **App:** standard Next.js on Vercel. `public/` is the dashboard shell; `app/api/[...path]/route.ts` hands every API request to `server/router.js` on the Node.js runtime. Functions run in Singapore (`sin1`, next to the Neon database).
+- **Database:** Neon Postgres via `DATABASE_URL`. `server/pg-d1.js` presents it to the server modules with the D1 interface they were written for (`prepare/bind/first/all/run`, `batch` as one transaction) and translates the few SQLite-only constructs. `npm run db:migrate` creates every table; the modules also bootstrap their tables idempotently on first use.
+- **Sign-in:** Google sign-in with an email allowlist (`server/auth.js`). The session is an HMAC-signed, HttpOnly cookie, and identity is never read from request headers. Set `AUTH_SECRET`, `ALLOWED_EMAILS`, `AUTH_GOOGLE_ID`/`AUTH_GOOGLE_SECRET` and `AUTH_URL`, and register `https://<domain>/api/auth/callback` on the Google OAuth client.
+- **Hourly check:** Vercel Cron (`vercel.json`) calls `/api/jobs/tick` at five past every hour with `Authorization: Bearer $CRON_SECRET`. Without a `CRON_SECRET` of 16+ characters the scheduled check is disabled. Hourly cron needs a Vercel Pro plan.
+- **Moving data from the old D1 database:** export it to SQL, then `npm run db:import-d1 -- export.sql` (dry run) and `-- --commit`. Keep the old `GOOGLE_TOKEN_KEY`, and map your email to the old workspace id with `OWNER_ID_OVERRIDES`, or stored Google connections cannot be decrypted.
+
+See `.env.example` for every variable. Locally, put them in `.env.local`.
 
 ## Keep GitHub in sync
 
