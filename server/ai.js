@@ -206,8 +206,8 @@ async function sample(env, owner, client, prompt, requestToken, meta = {}) {
   const model = env.OPENAI_MODEL || "gpt-5.4-mini";
   const today = new Date().toISOString().slice(0,10);
   // One atomic reservation per attempt. A timeout may have incurred a charge upstream.
-  const reserved = await env.DB.prepare(`INSERT OR IGNORE INTO ai_sample_attempts (owner,day,token)
-    SELECT ?,?,? WHERE (SELECT COUNT(*) FROM ai_sample_attempts WHERE owner=? AND day=?) < ? RETURNING token`)
+  const reserved = await env.DB.prepare(`INSERT INTO ai_sample_attempts (owner,day,token)
+    SELECT ?,?,? WHERE (SELECT COUNT(*) FROM ai_sample_attempts WHERE owner=? AND day=?) < ? ON CONFLICT DO NOTHING RETURNING token`)
     .bind(owner,today,token,owner,today,DAILY_LIMIT).first();
   if (!reserved) {
     const duplicate = await env.DB.prepare("SELECT token FROM ai_sample_attempts WHERE owner=? AND day=? AND token=?").bind(owner,today,token).first();

@@ -5,6 +5,8 @@ import test from 'node:test';
 import { handleApi } from '../server/router.js';
 import { memoryD1 } from './d1.mjs';
 
+const CRON = 'test-cron-secret-0123456789';
+
 const site = 'https://desk.example';
 const userA = 'owner-a';
 const userB = 'owner-b';
@@ -14,10 +16,10 @@ function workspace(t) {
   t.after(() => env.DB.close());
   async function request(path, { method = 'GET', owner = userA, body, origin = site, headers = {} } = {}) {
     const h = new Headers(headers);
-    if (owner) h.set('oai-authenticated-user-id', owner);
+    if (path.startsWith('/api/jobs/') && env.CRON_SECRET && !h.has('Authorization')) h.set('Authorization', 'Bearer ' + env.CRON_SECRET);
     if (origin && method !== 'GET') h.set('Origin', origin);
     if (body !== undefined) h.set('Content-Type', 'application/json');
-    const r = await handleApi(new Request(site + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) }), env);
+    const r = await handleApi(new Request(site + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) }), env, owner || null);
     const text = await r.text();
     let data;
     try { data = JSON.parse(text); } catch { data = text; }
@@ -134,7 +136,7 @@ test('unattended checks need private service access and tolerate duplicate deliv
   const denied = await request('/api/jobs/tick', { method: 'POST', owner: null });
   assert.ok([401, 403].includes(denied.status));
   await addClient();
-  env.PRIVATE_SITE_JOBS = 'enabled';
+  env.CRON_SECRET = CRON;
   const first = await request('/api/jobs/tick', { method: 'POST', owner: null, origin: null });
   assert.equal(first.ok, true, JSON.stringify(first));
   assert.equal(first.data.alreadyRun, false);
@@ -205,7 +207,7 @@ test('authorized GA4 property travels from discovery to sync and health inbox', 
   const body = { clientId:client.id, accountId:userAccount.id, source:'ga4', resourceId:resource.id };
   const binding = await request('/api/google/bindings',{method:'POST',body});
   assert.equal(binding.ok,true,JSON.stringify(binding));
-  env.PRIVATE_SITE_JOBS = 'enabled';
+  env.CRON_SECRET = CRON;
   const scheduled = await request('/api/jobs/tick',{method:'POST',owner:null,origin:null});
   assert.equal(scheduled.ok,true,JSON.stringify(scheduled));
   assert.equal(scheduled.data.run.synced,1,'Successful provider syncs must be counted by the scheduled job');

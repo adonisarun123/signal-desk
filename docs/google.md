@@ -16,7 +16,7 @@ The private agency workspace can connect several Google identities and map their
 
 | Name | Configuration |
 | --- | --- |
-| DB | Cloudflare D1 binding. The Google module creates its tables idempotently. The host creates the workspace clients table first. |
+| DATABASE_URL | Neon Postgres connection string. The Google module creates its tables idempotently; `npm run db:migrate` creates them up front. |
 | GOOGLE_REDIRECT_URI | Canonical HTTPS endpoint ending in /api/google/callback. HTTP is permitted only on localhost and 127.0.0.1 for development. The same value must be registered on the Google OAuth client. |
 | GOOGLE_TOKEN_KEY | A cryptographically random 32-byte value encoded in Base64 or Base64url. A deployment admin provisions this secret and protects its backup. Replacing it makes earlier encrypted credentials unreadable. |
 | GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET | Optional deployment-wide default OAuth app. Credentials saved by the owner take precedence in both interactive and unattended requests. |

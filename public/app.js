@@ -29,7 +29,7 @@ async function call(path,options={}){
   if(path==="/api/ai/sample"&&!headers.has("Idempotency-Key"))headers.set("Idempotency-Key",crypto.randomUUID());
   const res=await fetch(path,{method:options.method||"GET",headers,body:hasBody?JSON.stringify(options.body):undefined,credentials:"same-origin",cache:"no-store"});
   const obj=await res.json().catch(()=>null);
-  if(res.status===401&&obj?.signIn?.startsWith("/signin-with-chatgpt?"))signInPath=obj.signIn;
+  if(res.status===401&&obj?.signIn?.startsWith("/api/auth/signin?"))signInPath=obj.signIn;
   if(!res.ok||!obj)throw Error(obj?.error||(res.status===401?"Sign in to open the live workspace.":"The server did not return dashboard data. Please retry."));
   return obj;
 }

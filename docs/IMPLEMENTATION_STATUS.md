@@ -45,6 +45,6 @@ These sit behind the guide's rollout gates and each needs a decision or an accou
 
 ## Operational caveats
 
-- **Identity boundary.** The API trusts the `oai-authenticated-user-id` header. ChatGPT Sites strips client-supplied identity headers. Any other host needs a trusted gateway that does the same, or anyone can impersonate the owner.
+- **Identity boundary.** Identity comes only from the signed session cookie issued after Google sign-in for an allowlisted email (`server/auth.js`). Request headers are never trusted for identity; the old `oai-authenticated-user-id` header is ignored. Removing an email from `ALLOWED_EMAILS` revokes its sessions.
 - **Schema bootstrapping.** New columns and tables (client register, reviews, incident fields, AI panel fields, failed runs) are added idempotently at runtime, like the existing Google, health and AI tables. No manual migration is needed.
 - **Acceptance.** Fixture tests are not reconciliation. Use the production acceptance checklist in `docs/SCOPE.md` with a real client grant before treating any reading as a baseline.

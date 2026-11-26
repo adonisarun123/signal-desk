@@ -7,6 +7,8 @@ import { runHealthChecks } from '../server/health.js';
 import { composeOverview } from '../public/overview.js';
 import { memoryD1 } from './d1.mjs';
 
+const CRON = 'test-cron-secret-0123456789';
+
 const site = 'https://desk.example';
 const DAY = 86_400_000;
 
@@ -15,10 +17,10 @@ function workspace(t, extra = {}) {
   t.after(() => env.DB.close());
   async function request(path, { method = 'GET', owner = 'alice', body, headers = {} } = {}) {
     const h = new Headers(headers);
-    if (owner) h.set('oai-authenticated-user-id', owner);
+    if (path.startsWith('/api/jobs/') && env.CRON_SECRET && !h.has('Authorization')) h.set('Authorization', 'Bearer ' + env.CRON_SECRET);
     if (method !== 'GET') h.set('Origin', site);
     if (body !== undefined) h.set('Content-Type', 'application/json');
-    const r = await handleApi(new Request(site + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) }), env);
+    const r = await handleApi(new Request(site + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) }), env, owner || null);
     const text = await r.text();
     let data; try { data = JSON.parse(text); } catch { data = text; }
     return { status: r.status, ok: r.ok, data };
@@ -223,7 +225,7 @@ async function connectAccount(env, scope) {
 }
 
 test('the scheduler batch size follows SYNC_BATCH_LIMIT within safe bounds', async t => {
-  const { env, request } = workspace(t, { PRIVATE_SITE_JOBS: 'enabled', SYNC_BATCH_LIMIT: '12' });
+  const { env, request } = workspace(t, { CRON_SECRET: CRON, SYNC_BATCH_LIMIT: '12' });
   await request('/api/clients', { method: 'POST', body: { name: 'Atlas', domain: 'atlas.example' } });
   const run = await request('/api/jobs/tick', { method: 'POST', owner: null, headers: {} });
   assert.equal(run.data.run.batchLimit, 12, JSON.stringify(run));

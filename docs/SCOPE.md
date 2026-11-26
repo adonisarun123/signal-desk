@@ -3,7 +3,7 @@
 
 Signal Desk gives Arun and the Monk Mantra team one place to see which client needs attention, what changed, how fresh the evidence is and what to check next. Use Google Analytics' rolling live count to inspect activity now. Use completed reporting periods to judge movement in traffic, search visibility and key events.
 
-[Open the private Signal Desk workspace](https://monk-mantra-signal-desk.adonis-arun.chatgpt.site)
+[Open the private Signal Desk workspace](https://monk-mantra-signal-desk.adonis-arun.chatgpt.site) (previous ChatGPT Sites deployment; the Vercel URL replaces it after cut-over)
 
 ## Starting with one client
 Begin with a client whose Analytics and Search Console reports you can reconcile directly. For a clinic with a corporate website and two doctor websites, agree which domain belongs to each client record before connecting properties. A domain-wide Search Console property can include multiple subdomains. A shared GA4 property can include more than one website. Either can inflate a portfolio total if mapped twice.
@@ -129,7 +129,7 @@ For Google AI Overviews and AI Mode, also inspect the official Search Console im
 
 # Architecture and operational ownership
 
-The browser displays a portfolio and sends authenticated requests to a server-side Worker. The Worker owns Google OAuth, property mapping, API requests and data normalization. A persistent D1 database stores workspace records and integration state. Provider credentials and tokens belong at the server boundary. Sample data and live records have separate paths.
+The browser displays a portfolio and sends authenticated requests to server-side API routes on Vercel. The server owns Google OAuth, property mapping, API requests and data normalization. A Neon Postgres database stores workspace records and integration state. Provider credentials and tokens belong at the server boundary. Sample data and live records have separate paths.
 
 | Record | Purpose and boundary |
 | --- | --- |
